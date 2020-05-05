@@ -1,0 +1,115 @@
+---
+title: "projectC"
+author: "Jiayin Qu"
+date: "5/4/2020"
+output: pdf_document
+---
+# Libraries
+```{r setup, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringr)
+library(readxl)
+library(glmnet)
+library(caret)
+library(klaR)
+library(parallel)
+library(doParallel)
+```
+
+# Data import
+- The dataset is extracted from https://openpsychometrics.org/_rawdata/, containing data from a study that examine the Firstborn Personality Scale. The information of the study can be found through https://openpsychometrics.org/tests/birthorder/development/. The variables we utilize in this case are personality items as predictors and firstborn (or not) in multi-children family as outcome. 
+
+- I chose this data because it has a clear outcome variable and gathered relatively comprehensive personality data using a reasonable measure. 
+
+- Research background: some evidence suggests that birth order can have large practical effects. For example, some groups, such as professors, have many more firstborns than would be expected by chance. However, Rohrer, Egloff, and Schmukle (2015) analyzed birth order effects on the big five personality traits and found a meaningful difference between 1st and 2nd born children on the "Intellect" facet of the personality trait "Openness to Experience", but no differences on the other traits. In their study, they only used ordinary least-squares regression to conduct the analysis. Therefore, this current analysis aims to examine whether other models can provide better prediction results. 
+
+- Research question: can personality variables (along with other variables like age, gender, and English as native language) predict whether a person is the firstborn in his/her family? 
+
+- Why machine learning: machine learning is proper here as the main purpose is to predict instead of explain in this case. What's more, the dataset is large enough to conduct this type of analysis. 
+
+```{r}
+dataset <- read_excel("../data/firstborn.xlsx", col_names = TRUE)
+# clean the data 
+firstborn <- dataset %>%
+  dplyr::select(-starts_with("Q")) %>%
+  filter(birthn > 1 & birthpos !=0 & birthn >= birthpos) %>%
+  filter(!is.na(birthpos)) %>%
+  na_if(., 0) %>%
+  mutate(firstborn = as.factor(ifelse(birthpos == 1, "yes", "no"))) %>%
+  dplyr::select(-birthpos, -birthn, -country, -source, -screensize, -introelapse, -testelapse, -endelapse)
+
+missing_value_tbl <- firstborn %>%
+  mutate_all(~ ifelse(is.na(.), 1, 0))
+firstborn$missings <- rowSums(missing_value_tbl)
+
+firstborn <- firstborn %>%
+  filter(missings <= 5) %>%
+  dplyr::select(-missings)
+
+holdout_indices <- createDataPartition(firstborn$firstborn, p=0.6, list=FALSE)
+train_tbl <- firstborn[holdout_indices, ]
+test_tbl <- firstborn[-holdout_indices, ]
+```
+
+
+# Data analysis
+- We chose three machine learning: glm (binomial), naive bayes, and knn. The reason to choose these three methods is because that we have a categorical outcome and the main purpose here is to do classficiation. Therefore, we have chosen three methods that are commonly used and whose purpose is classification. 
+
+```{r, warning = FALSE, message = FALSE, error = FALSE}
+fold_indices <- createFolds(holdout_indices, 10)
+no_of_cores <- detectCores()
+cl <- makeCluster(no_of_cores-1)
+registerDoParallel(cl)
+
+glm_model <- train(
+  firstborn ~ ., 
+  train_tbl, 
+  method = "glm", 
+  family = "binomial",
+  preProcess = c("center", "scale", "zv", "knnImpute", "pca"), 
+  na.action = na.pass, 
+  trControl = trainControl(method = "cv", number = 10, verboseIter = T, index = fold_indices)
+)
+glm_model
+confusionMatrix(predict(glm_model, test_tbl, na.action = na.pass), test_tbl$firstborn)
+
+nb_model <- train(
+  firstborn ~ .,
+  train_tbl,
+  method = "nb",
+  metric = "Kappa", 
+  tuneLength = 2,
+  preProcess = c("knnImpute", "zv","center", "scale", "pca"),
+  trControl = trainControl(method = "cv", number = 10, verboseIter = T, index = fold_indices),
+  na.action = na.pass
+)
+nb_model
+confusionMatrix(predict(nb_model, test_tbl, na.action = na.pass), test_tbl$firstborn)
+
+knn_model <- train(
+  firstborn ~ .,
+  train_tbl,
+  method = "knn",
+  metric = "Kappa", 
+  tuneLength = 2,
+  preProcess = c("knnImpute", "zv","center", "scale", "pca"),
+  trControl = trainControl(method = "cv", number = 10, verboseIter = T, index = fold_indices),
+  na.action = na.pass
+)
+knn_model
+confusionMatrix(predict(knn_model, test_tbl, na.action = na.pass), test_tbl$firstborn)
+
+stopCluster(cl)
+```
+
+# Model comparison
+- Based on the comparison, we found that glm model performs the best among the three models. However, based on the Kappa and Accuracy, none of the models turns out to predict firstborn to a reasonable level (Kappas are smaller than 0.01 and Accuracies are about the same as random guessing). The findings further support Rohrer, Egloff, and Schmukle (2015)'s finding in that personalities seem to not have an effects on whether a person is first born or not. 
+
+```{r}
+model_list <- list(glm_model = glm_model, nb_model = nb_model, knn_model = knn_model)
+resamples <- resamples(model_list)
+bwplot(resamples, metric = "Accuracy")
+bwplot(resamples, metric = "Kappa")
+```
+
